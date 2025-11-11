@@ -120,82 +120,104 @@ class QRScanner : CDVPlugin, AVCaptureMetadataOutputObjectsDelegate {
         }
     }
 
-    @objc func prepScanner(command: CDVInvokedUrlCommand) -> Bool{
-        /*if (command.arguments.count > 0) {
-            setAcceptableFormatList(arg: command.argument(at: 0)!)
-        } // Otherwise, use previously set format list*/
- 
-        let status = AVCaptureDevice.authorizationStatus(for: AVMediaType.video)
-        if (status == AVAuthorizationStatus.restricted) {
-            self.sendErrorCode(command: command, error: QRScannerError.camera_access_restricted)
-            return false
-        } else if status == AVAuthorizationStatus.denied {
-            self.sendErrorCode(command: command, error: QRScannerError.camera_access_denied)
-            return false
-        }
-        do {
-            if (captureSession?.isRunning != true){
-                cameraView.backgroundColor = UIColor.clear
-                self.webView!.superview!.insertSubview(cameraView, belowSubview: self.webView!)
-                // let deviceDiscoverySession = AVCaptureDevice.DiscoverySession(
-                //     deviceTypes: [ .builtInWideAngleCamera, .builtInDualCamera ],
-                //     mediaType: .video,
-                //     position: .unspecified
-                // )
-                // let availableVideoDevices =   deviceDiscoverySession.devices;
-                let availableVideoDevices =  AVCaptureDevice.devices(for: AVMediaType.video)
-                for device in availableVideoDevices {
-                    if device.position == AVCaptureDevice.Position.back {
-                        backCamera = device
-                    }
-                    else if device.position == AVCaptureDevice.Position.front {
-                        frontCamera = device
-                    }
-                }
-                // older iPods have no back camera
-                if(backCamera == nil){
-                    currentCamera = 1
-                }
-                let input: AVCaptureDeviceInput
-                input = try self.createCaptureDeviceInput()
-                captureSession = AVCaptureSession()
-                captureSession!.addInput(input)
-                metaOutput = AVCaptureMetadataOutput()
-                captureSession!.addOutput(metaOutput!)
-                metaOutput!.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
-                metaOutput!.metadataObjectTypes = QRScanner.codemap.map { $1 };
-                captureVideoPreviewLayer = AVCaptureVideoPreviewLayer(session: captureSession!)
-                cameraView.addPreviewLayer(captureVideoPreviewLayer)
-                // --- ACTIVAR AUTOFOCUS ---
-                if let device = input.device {
-                    do {
-                        try device.lockForConfiguration()
-                        if device.isFocusModeSupported(.continuousAutoFocus) {
-                            device.focusMode = .continuousAutoFocus
-                        } else if device.isFocusModeSupported(.autoFocus) {
-                            device.focusMode = .autoFocus
-                        }
-                        device.unlockForConfiguration()
-                    } catch {
-                        print("Error al configurar autofocus: \(error.localizedDescription)")
-                    }
-                }
-                // --- FIN AUTOFOCUS ---
-                captureSession!.startRunning()
-            }
-            return true
-        } catch CaptureError.backCameraUnavailable {
-            self.sendErrorCode(command: command, error: QRScannerError.back_camera_unavailable)
-        } catch CaptureError.frontCameraUnavailable {
-            self.sendErrorCode(command: command, error: QRScannerError.front_camera_unavailable)
-        } catch CaptureError.couldNotCaptureInput(let error){
-            print(error.localizedDescription)
-            self.sendErrorCode(command: command, error: QRScannerError.camera_unavailable)
-        } catch {
-            self.sendErrorCode(command: command, error: QRScannerError.unexpected_error)
-        }
+    @objc func prepScanner(command: CDVInvokedUrlCommand) -> Bool {
+    let status = AVCaptureDevice.authorizationStatus(for: .video)
+    if status == .restricted {
+        self.sendErrorCode(command: command, error: QRScannerError.camera_access_restricted)
+        return false
+    } else if status == .denied {
+        self.sendErrorCode(command: command, error: QRScannerError.camera_access_denied)
         return false
     }
+    
+    do {
+        if captureSession?.isRunning != true {
+            cameraView.backgroundColor = UIColor.clear
+            self.webView!.superview!.insertSubview(cameraView, belowSubview: self.webView!)
+            
+            // 🔍 Buscar cámaras disponibles
+            var ultraWideCamera: AVCaptureDevice?
+            if #available(iOS 13.0, *) {
+                ultraWideCamera = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
+            }
+
+            let availableVideoDevices = AVCaptureDevice.devices(for: .video)
+            for device in availableVideoDevices {
+                if device.position == .back {
+                    backCamera = device
+                } else if device.position == .front {
+                    frontCamera = device
+                }
+            }
+
+            // Si hay ultra gran angular, la usamos (modo macro)
+            if let ultra = ultraWideCamera {
+                backCamera = ultra
+                print("📸 Usando cámara ultra gran angular (modo macro posible).")
+            }
+
+            // Si no hay cámara trasera (ej. iPod antiguo)
+            if backCamera == nil {
+                currentCamera = 1
+            }
+
+            // Configurar la sesión
+            let input = try self.createCaptureDeviceInput()
+            captureSession = AVCaptureSession()
+            captureSession!.addInput(input)
+
+            metaOutput = AVCaptureMetadataOutput()
+            captureSession!.addOutput(metaOutput!)
+            metaOutput!.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
+            metaOutput!.metadataObjectTypes = QRScanner.codemap.map { $1 }
+
+            captureVideoPreviewLayer = AVCaptureVideoPreviewLayer(session: captureSession!)
+            cameraView.addPreviewLayer(captureVideoPreviewLayer)
+            
+            // 🧠 Intentar enfoque cercano (macro manual)
+            if let device = backCamera {
+                do {
+                    try device.lockForConfiguration()
+                    
+                    // Enfoque al máximo (1.0 = más cercano)
+                    if device.isFocusModeSupported(.locked) {
+                        device.setFocusModeLocked(lensPosition: 1.0, completionHandler: nil)
+                        print("🔬 Enfoque macro manual activado (lensPosition = 1.0)")
+                    } else if device.isFocusModeSupported(.autoFocus) {
+                        device.focusMode = .autoFocus
+                        print("🔁 Enfoque automático activado (no se pudo bloquear macro manual).")
+                    }
+
+                    // Exposición automática continua (para brillo correcto)
+                    if device.isExposureModeSupported(.continuousAutoExposure) {
+                        device.exposureMode = .continuousAutoExposure
+                    }
+
+                    device.unlockForConfiguration()
+                } catch {
+                    print("⚠️ Error configurando el enfoque macro: \(error)")
+                }
+            }
+
+            // Iniciar la cámara
+            captureSession!.startRunning()
+        }
+        return true
+
+    } catch CaptureError.backCameraUnavailable {
+        self.sendErrorCode(command: command, error: QRScannerError.back_camera_unavailable)
+    } catch CaptureError.frontCameraUnavailable {
+        self.sendErrorCode(command: command, error: QRScannerError.front_camera_unavailable)
+    } catch CaptureError.couldNotCaptureInput(let error) {
+        print(error.localizedDescription)
+        self.sendErrorCode(command: command, error: QRScannerError.camera_unavailable)
+    } catch {
+        self.sendErrorCode(command: command, error: QRScannerError.unexpected_error)
+    }
+
+    return false
+}
+
 
     @objc func createCaptureDeviceInput() throws -> AVCaptureDeviceInput {
         var captureDevice: AVCaptureDevice
